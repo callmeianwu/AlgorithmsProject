@@ -520,7 +520,7 @@ class TrafficVisualizer:
                     label="Spawn Rate",
                     default_value=0.05,
                     min_value=0.0,
-                    max_value=1,
+                    max_value=2.0,
                     callback=lambda s, v: setattr(self.sim, 'spawn_rate', v)
                 )
                 dpg.add_checkbox(
@@ -538,7 +538,8 @@ class TrafficVisualizer:
                 )
 
                 dpg.add_separator()
-                dpg.add_text("Drawing Mode:")
+
+            with dpg.collapsing_header(label="Drawing Mode", default_open=True):
                 with dpg.group(horizontal=True):
                     dpg.add_button(label="View", callback=lambda: self.set_mode("view"))
                     dpg.add_button(label="Draw Nodes", callback=lambda: self.set_mode("draw_nodes"))
@@ -550,14 +551,14 @@ class TrafficVisualizer:
             dpg.add_separator()
 
             # Drawing canvas (wider)
-            with dpg.drawlist(width=1200, height=600, tag="canvas"):
+            with dpg.drawlist(width=1800, height=600, tag="canvas"):
                 pass
 
             # Mouse handler for canvas
             with dpg.handler_registry():
                 dpg.add_mouse_click_handler(callback=self.handle_mouse_click)
 
-        dpg.create_viewport(title="Traffic Simulator", width=1300, height=850)
+        dpg.create_viewport(title="Traffic Simulator", width=1000, height=850)
         dpg.setup_dearpygui()
         dpg.show_viewport()
         dpg.set_primary_window("main_window", True)
@@ -613,8 +614,8 @@ COLORS:
         # Drawing-local coordinates inside the drawlist
         x, y = dpg.get_drawing_mouse_pos()
 
-        # Match the drawlist size (width=1200, height=600)
-        if x < 0 or x > 1200 or y < 0 or y > 600:
+        # Match the drawlist size (width=1800, height=600)
+        if x < 0 or x > 1800 or y < 0 or y > 600:
             return
 
         if self.draw_mode == "draw_nodes":
