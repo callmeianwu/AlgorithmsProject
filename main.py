@@ -526,7 +526,66 @@ class TrafficVisualizer:
 
         # Drawing mode
         self.draw_mode = "view"  # "view", "draw_nodes", "draw_roads"
-        self.selected_node = None
+        self.selected_node = None  # used for drawing roads
+
+        # === Selection support ===
+        self.selection_type = None   # "node", "road", or None
+        self.selection_id = None
+
+    # === Picking helpers ===
+
+    def _point_to_segment_distance(self, px, py, x1, y1, x2, y2):
+        """Distance from point (px,py) to line segment (x1,y1)-(x2,y2)."""
+        vx = x2 - x1
+        vy = y2 - y1
+        wx = px - x1
+        wy = py - y1
+
+        c1 = vx * wx + vy * wy
+        if c1 <= 0:
+            # Closest to (x1,y1)
+            dx = px - x1
+            dy = py - y1
+            return math.sqrt(dx * dx + dy * dy)
+
+        c2 = vx * vx + vy * vy
+        if c2 <= c1:
+            # Closest to (x2,y2)
+            dx = px - x2
+            dy = py - y2
+            return math.sqrt(dx * dx + dy * dy)
+
+        # Projection in the middle of the segment
+        t = c1 / c2
+        projx = x1 + t * vx
+        projy = y1 + t * vy
+        dx = px - projx
+        dy = py - projy
+        return math.sqrt(dx * dx + dy * dy)
+
+    def _pick_road(self, x, y, pixel_threshold=10.0):
+        """Return road_id whose segment is closest to (x,y), if within threshold."""
+        best_road = None
+        best_dist = pixel_threshold
+
+        for road_id, road_data in self.sim.graph.roads.items():
+            from_node = road_data['from']
+            to_node = road_data['to']
+
+            if from_node not in self.sim.graph.nodes or to_node not in self.sim.graph.nodes:
+                continue
+
+            x1, y1 = self.sim.graph.nodes[from_node]
+            x2, y2 = self.sim.graph.nodes[to_node]
+
+            d = self._point_to_segment_distance(x, y, x1, y1, x2, y2)
+            if d < best_dist:
+                best_dist = d
+                best_road = road_id
+
+        return best_road
+
+    # === UI setup ===
 
     def start(self):
         dpg.create_context()
@@ -561,10 +620,6 @@ class TrafficVisualizer:
                     max_value=2.0,
                     callback=lambda s, v: setattr(self.sim, 'spawn_rate', v)
                 )
-                dpg.add_checkbox(
-                    label="Use A* (vs Dijkstra)",
-                    callback=lambda s, v: setattr(self.sim, 'use_astar', v)
-                )
 
                 dpg.add_slider_float(
                     label="Traffic Sensitivity",
@@ -575,8 +630,14 @@ class TrafficVisualizer:
                     callback=lambda s, v: setattr(self.sim, 'traffic_sensitivity', v)
                 )
 
+                dpg.add_checkbox(
+                    label="Use A* (vs Dijkstra)",
+                    callback=lambda s, v: setattr(self.sim, 'use_astar', v)
+                )
+
                 dpg.add_separator()
 
+            # Drawing mode section
             with dpg.collapsing_header(label="Drawing Mode", default_open=True):
                 with dpg.group(horizontal=True):
                     dpg.add_button(label="View", callback=lambda: self.set_mode("view"))
@@ -584,7 +645,12 @@ class TrafficVisualizer:
                     dpg.add_button(label="Draw Roads", callback=lambda: self.set_mode("draw_roads"))
                 dpg.add_text("Mode: View", tag="mode_text")
 
-                dpg.add_text("", tag="stats")
+            # === Selection panel ===
+            with dpg.collapsing_header(label="Selection", default_open=True):
+                dpg.add_text("Nothing selected", tag="selection_label")
+
+            # Stats
+            dpg.add_text("", tag="stats")
 
             dpg.add_separator()
 
@@ -621,6 +687,7 @@ class TrafficVisualizer:
 
 VIEW MODE:
 - Watch the simulation
+- Click on a node or road to see its info in the Selection panel
 
 DRAW NODES MODE:
 - Click anywhere on canvas to create intersection nodes
@@ -637,7 +704,6 @@ COLORS:
 
         with dpg.window(label="Help", modal=True, show=True, width=400, height=300, pos=(225, 200)) as help_win:
             dpg.add_text(help_text)
-            dpg.add_button(label="Close", callback=lambda: dpg.delete_item(help_win))
 
     def set_mode(self, mode):
         self.draw_mode = mode
@@ -656,6 +722,33 @@ COLORS:
         if x < 0 or x > 1800 or y < 0 or y > 600:
             return
 
+        # === View mode: picking / selection ===
+        if self.draw_mode == "view":
+            # Try node first (bigger hit area)
+            node_id = self.sim.graph.get_node_at(x, y, threshold=20)
+            if node_id is not None:
+                self.selection_type = "node"
+                self.selection_id = node_id
+                dpg.set_value("selection_label", f"Node: {node_id}")
+                return
+
+            # Try road
+            road_id = self._pick_road(x, y, pixel_threshold=10.0)
+            if road_id is not None:
+                r = self.sim.graph.roads[road_id]
+                label = f"Road {road_id}: {r['from']} → {r['to']}"
+                self.selection_type = "road"
+                self.selection_id = road_id
+                dpg.set_value("selection_label", label)
+                return
+
+            # Clicked empty space: clear selection
+            self.selection_type = None
+            self.selection_id = None
+            dpg.set_value("selection_label", "Nothing selected")
+            return
+
+        # === Draw modes ===
         if self.draw_mode == "draw_nodes":
             self.sim.graph.add_node_auto(x, y)
 
@@ -670,7 +763,7 @@ COLORS:
                 else:
                     self.sim.add_road_between_nodes(self.selected_node, node)
                     self.selected_node = None
-        # In "view" mode, clicks do nothing
+        # In other modes, clicks do nothing
 
     def toggle_simulation(self):
         self.running = not self.running
@@ -683,12 +776,18 @@ COLORS:
         self.sim = TrafficSimulator()
         dpg.set_item_label("start_btn", "Start")
         self.selected_node = None
+        self.selection_type = None
+        self.selection_id = None
+        dpg.set_value("selection_label", "Nothing selected")
 
     def clear_all(self):
         self.running = False
         self.sim.clear_network()
         dpg.set_item_label("start_btn", "Start")
         self.selected_node = None
+        self.selection_type = None
+        self.selection_id = None
+        dpg.set_value("selection_label", "Nothing selected")
 
     def render(self):
         dpg.delete_item("canvas", children_only=True)
@@ -740,8 +839,15 @@ COLORS:
         for node_id, (x, y) in self.sim.graph.nodes.items():
             color = (100, 100, 100, 255)
 
-            if self.selected_node == node_id:
+            # Highlight node selected in View mode
+            if self.selection_type == "node" and self.selection_id == node_id:
+                color = (100, 15, 10, 255)  # gold/yellow for selected node
+
+            # Highlight node used in draw_roads mode
+            elif self.selected_node == node_id:
                 color = (0, 100, 255, 255)
+
+            # Highlight signals
             elif node_id in self.sim.signals:
                 signal = self.sim.signals[node_id]
                 if signal.phases:
@@ -755,6 +861,7 @@ COLORS:
                 size=13,
                 parent="canvas"
             )
+
 
         # Draw vehicles as little arrows showing direction
         for vehicle_id, vdata in self.sim.vehicles.items():
