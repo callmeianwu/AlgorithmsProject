@@ -185,9 +185,17 @@ class Lane:
 # ============================================================================
 
 class TrafficSignal:
-    def __init__(self, node_id, incoming_roads, cycle_time=30):
+    def __init__(self, node_id, phases, cycle_time=30):
+        """
+        phases: list of phases, each phase is a list of road_ids that are green together.
+        Example:
+            phases = [
+                [road_id_WC, road_id_EC],  # east-west
+                [road_id_NC, road_id_SC],  # north-south
+            ]
+        """
         self.node_id = node_id
-        self.incoming_roads = incoming_roads  # list of road_ids
+        self.phases = phases
         self.cycle_time = cycle_time
         self.current_phase = 0
         self.timer = 0
@@ -196,36 +204,49 @@ class TrafficSignal:
     def step(self, graph):
         self.timer += 1
 
+        if not self.phases:
+            return
+
         if self.mode == "fixed":
             if self.timer >= self.cycle_time:
                 self.timer = 0
-                self.current_phase = (self.current_phase + 1) % max(1, len(self.incoming_roads))
-        else:  # adaptive
+                self.current_phase = (self.current_phase + 1) % len(self.phases)
+        else:  # adaptive over PHASES instead of single roads
             if self.timer >= 10:  # Min green time
-                if len(self.incoming_roads) > 0:
-                    # Check queue length heuristic
-                    current_queue = sum(
+                # Queue on the current phase
+                current_queue = 0
+                for road_id in self.phases[self.current_phase]:
+                    current_queue += sum(
                         lane.vehicle_count()
-                        for lane in graph.roads[self.incoming_roads[self.current_phase]]['lanes']
+                        for lane in graph.roads[road_id]['lanes']
                     )
 
-                    # Switch if current queue is low or timer exceeded
-                    if current_queue < 2 or self.timer >= self.cycle_time:
-                        self.timer = 0
-                        # Find road with longest queue
-                        max_queue = 0
-                        next_phase = (self.current_phase + 1) % len(self.incoming_roads)
-                        for i, road_id in enumerate(self.incoming_roads):
-                            queue = sum(lane.vehicle_count() for lane in graph.roads[road_id]['lanes'])
-                            if queue > max_queue:
-                                max_queue = queue
-                                next_phase = i
-                        self.current_phase = next_phase
+                # Switch if current queue is low or timer exceeded
+                if current_queue < 2 or self.timer >= self.cycle_time:
+                    self.timer = 0
+
+                    # Pick phase with max queue
+                    max_queue = -1
+                    next_phase = self.current_phase
+                    for i, phase in enumerate(self.phases):
+                        q = 0
+                        for road_id in phase:
+                            q += sum(
+                                lane.vehicle_count()
+                                for lane in graph.roads[road_id]['lanes']
+                            )
+                        if q > max_queue:
+                            max_queue = q
+                            next_phase = i
+
+                    self.current_phase = next_phase
 
     def is_green(self, road_id):
-        if not self.incoming_roads:
+        """Return True if this road_id is green in the current phase."""
+        if not self.phases:
             return True
-        return self.incoming_roads[self.current_phase] == road_id
+        return road_id in self.phases[self.current_phase]
+
 
 
 # ============================================================================
@@ -240,22 +261,24 @@ class TrafficSimulator:
         self.vehicle_counter = 0
         self.spawn_rate = 0.05
         self.use_astar = False
+
+        # NEW: how strongly routing avoids congestion
+        # 0.0 = ignore traffic, 1.0 = very sensitive
+        self.traffic_sensitivity = 0.1
+
         self.vehicle_colors = [
-            (255, 255, 0, 255),   # Yellow
-            (255, 0, 255, 255),   # Magenta
-            (0, 255, 255, 255),   # Cyan
-            (255, 128, 0, 255),   # Orange
-            (128, 0, 255, 255),   # Purple
-            (0, 255, 128, 255),   # Green-cyan
-            (255, 0, 128, 255),   # Pink
-            (128, 255, 0, 255),   # Lime
+            (255, 255, 255, 255),   # White
+            (160, 200, 255, 255),   # Light blue
+            (120, 160, 255, 255),   # Medium blue
+            (200, 160, 255, 255),   # Lavender
+            (170, 120, 255, 255),   # Purple-ish
         ]
+
 
         self._setup_demo_network()
 
     def _setup_demo_network(self):
         """Create a demo intersection network"""
-        # Create a grid-like network
         nodes = {
             'W': (100, 300),
             'E': (700, 300),
@@ -287,9 +310,35 @@ class TrafficSimulator:
             for _ in range(2):
                 self.graph.roads[road_id]['lanes'].append(Lane(30, max_speed=5))
 
-        # Add traffic signals at center (incoming roads into 'C')
-        incoming = [r for r in self.graph.roads.keys() if self.graph.roads[r]['to'] == 'C']
-        self.signals['C'] = TrafficSignal('C', incoming[:4], cycle_time=30)  # 4-way
+        # ---- NEW: build phases as compatible directions for node C ----
+        # Find incoming roads into C, grouped by the FROM node
+        incoming_map = {}  # from_node -> road_id
+        for road_id, rdata in self.graph.roads.items():
+            if rdata['to'] == 'C':
+                incoming_map[rdata['from']] = road_id
+
+        # Expect W,E,N,S
+        road_WC = incoming_map.get('W')
+        road_EC = incoming_map.get('E')
+        road_NC = incoming_map.get('N')
+        road_SC = incoming_map.get('S')
+
+        phases = []
+
+        # Phase 0: East-West (if both exist)
+        ew_phase = [r for r in (road_WC, road_EC) if r is not None]
+        if ew_phase:
+            phases.append(ew_phase)
+
+        # Phase 1: North-South (if both exist)
+        ns_phase = [r for r in (road_NC, road_SC) if r is not None]
+        if ns_phase:
+            phases.append(ns_phase)
+
+        # Create signal with these phases
+        if phases:
+            self.signals['C'] = TrafficSignal('C', phases, cycle_time=30)
+
 
     def clear_network(self):
         """Clear all roads and nodes"""
@@ -319,11 +368,12 @@ class TrafficSimulator:
         start = random.choice(nodes)
         goal = random.choice([n for n in nodes if n != start])
 
-        # Get current traffic weights
+        # Get current traffic weights (this is where we consider congestion)
         traffic_weights = {}
         for road_id, road_data in self.graph.roads.items():
             total_vehicles = sum(lane.vehicle_count() for lane in road_data['lanes'])
-            traffic_weights[road_id] = 1.0 + (total_vehicles * 0.1)
+            # NEW: use traffic_sensitivity instead of fixed 0.1
+            traffic_weights[road_id] = 1.0 + self.traffic_sensitivity * total_vehicles
 
         # Route vehicle
         if self.use_astar:
@@ -409,7 +459,7 @@ class TrafficSimulator:
         for vid in to_remove:
             del self.vehicles[vid]
 
-        # Update traffic levels
+        # Update traffic levels (for coloring)
         for road_id, road_data in self.graph.roads.items():
             total_vehicles = sum(lane.vehicle_count() for lane in road_data['lanes'])
             road_data['current_traffic'] = total_vehicles
@@ -463,12 +513,22 @@ class TrafficVisualizer:
                     label="Spawn Rate",
                     default_value=0.05,
                     min_value=0.0,
-                    max_value=0.3,
+                    max_value=1,
                     callback=lambda s, v: setattr(self.sim, 'spawn_rate', v)
                 )
                 dpg.add_checkbox(
                     label="Use A* (vs Dijkstra)",
                     callback=lambda s, v: setattr(self.sim, 'use_astar', v)
+                )
+
+                # NEW: slider to control how strongly routing avoids traffic
+                dpg.add_slider_float(
+                    label="Traffic Sensitivity",
+                    default_value=self.sim.traffic_sensitivity,
+                    min_value=0.0,
+                    max_value=0.5,
+                    format="%.2f",
+                    callback=lambda s, v: setattr(self.sim, 'traffic_sensitivity', v)
                 )
 
                 dpg.add_separator()
@@ -484,14 +544,15 @@ class TrafficVisualizer:
             dpg.add_separator()
 
             # Drawing canvas
-            with dpg.drawlist(width=800, height=600, tag="canvas"):
+            with dpg.drawlist(width=1800, height=600, tag="canvas"):
                 pass
+
 
             # Mouse handler for canvas
             with dpg.handler_registry():
                 dpg.add_mouse_click_handler(callback=self.handle_mouse_click)
 
-        dpg.create_viewport(title="Traffic Simulator", width=850, height=850)
+        dpg.create_viewport(title="Traffic Simulator", width=1600, height=850)
         dpg.setup_dearpygui()
         dpg.show_viewport()
         dpg.set_primary_window("main_window", True)
@@ -545,11 +606,11 @@ COLORS:
         if not dpg.is_item_hovered("canvas"):
             return
 
-        # Use drawing-local coordinates (this is the big fix)
+        # Drawing-local coordinates inside the drawlist
         x, y = dpg.get_drawing_mouse_pos()
 
-        # Optional bounds check
-        if x < 0 or x > 800 or y < 0 or y > 600:
+        # Match the drawlist size (width=1500, height=600)
+        if x < 0 or x > 1800 or y < 0 or y > 600:
             return
 
         if self.draw_mode == "draw_nodes":
@@ -570,8 +631,8 @@ COLORS:
                     # Create road
                     self.sim.add_road_between_nodes(self.selected_node, node)
                     self.selected_node = None
-
         # In "view" mode, clicks do nothing
+
 
     def toggle_simulation(self):
         self.running = not self.running
@@ -647,8 +708,9 @@ COLORS:
             # Highlight signals
             elif node_id in self.sim.signals:
                 signal = self.sim.signals[node_id]
-                if signal.incoming_roads:
+                if signal.phases:
                     color = (0, 200, 0, 255)
+
 
             dpg.draw_circle((x, y), 15, color=color, fill=color, parent="canvas")
             dpg.draw_text(
@@ -659,7 +721,7 @@ COLORS:
                 parent="canvas"
             )
 
-        # Draw vehicles with their individual colors
+        # Draw vehicles with their individual colors and directions
         for vehicle_id, vdata in self.sim.vehicles.items():
             lane = vdata['lane']
             road_id = vdata['road_id']
@@ -667,7 +729,6 @@ COLORS:
             # Find vehicle position in lane
             for i, cell in enumerate(lane.cells):
                 if cell == vehicle_id:
-                    # Calculate position along road
                     road = self.sim.graph.roads[road_id]
                     from_node = road['from']
                     to_node = road['to']
@@ -678,18 +739,64 @@ COLORS:
                     x1, y1 = self.sim.graph.nodes[from_node]
                     x2, y2 = self.sim.graph.nodes[to_node]
 
+                    # Position along road [0,1]
                     t = i / lane.length
                     x = x1 + (x2 - x1) * t
                     y = y1 + (y2 - y1) * t
 
-                    dpg.draw_circle(
-                        (x, y),
-                        5,
-                        color=vdata['color'],
-                        fill=vdata['color'],
+                    # Direction of travel (normalize)
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    length = math.sqrt(dx * dx + dy * dy)
+                    if length == 0:
+                        break
+                    dx /= length
+                    dy /= length
+
+                    # Arrow geometry
+                    body_len = 3   # length of arrow body
+                    head_len = 3   # extra length for head
+                    half_width = 4 # half width of arrow base
+
+                    # Tip of the arrow (in front)
+                    tip_x = x + dx * (body_len + head_len)
+                    tip_y = y + dy * (body_len + head_len)
+
+                    # Base center slightly behind the car center
+                    base_x = x - dx * body_len
+                    base_y = y - dy * body_len
+
+                    # Perpendicular for width
+                    perp_x = -dy
+                    perp_y = dx
+
+                    left_x  = base_x + perp_x * half_width
+                    left_y  = base_y + perp_y * half_width
+                    right_x = base_x - perp_x * half_width
+                    right_y = base_y - perp_y * half_width
+
+                    color = vdata['color']
+
+                    # Optional: small line for the body (from base center to tip)
+                    dpg.draw_line(
+                        (base_x, base_y),
+                        (tip_x, tip_y),
+                        color=color,
+                        thickness=2,
+                        parent="canvas"
+                    )
+
+                    # Arrow head
+                    dpg.draw_triangle(
+                        (tip_x, tip_y),
+                        (left_x, left_y),
+                        (right_x, right_y),
+                        color=color,
+                        fill=color,
                         parent="canvas"
                     )
                     break
+
 
         # Update stats
         total_vehicles = len(self.sim.vehicles)
