@@ -13,7 +13,7 @@ class RoadGraph:
     def __init__(self):
         self.edges = defaultdict(list)  # node -> [(neighbor, base_weight, road_id)]
         self.nodes = {}                 # node_id -> (x, y)
-        self.roads = {}                 # road_id -> {'from', 'to', 'base_weight', 'lanes', 'current_traffic'}
+        self.roads = {}                 # road_id -> {'from', 'to', 'base_weight', 'lanes', 'current_traffic', 'name'}
         self.road_counter = 0
         self.node_counter = 0
 
@@ -35,8 +35,9 @@ class RoadGraph:
             'from': from_node,
             'to': to_node,
             'base_weight': base_weight,
-            'lanes': [],   # Will hold cellular automaton lanes
-            'current_traffic': 0  # For visualization
+            'lanes': [],             # Will hold cellular automaton lanes
+            'current_traffic': 0,    # For visualization
+            'name': f"Road {road_id}"
         }
         return road_id
 
@@ -305,6 +306,8 @@ class TrafficSimulator:
 
         for from_node, to_node, weight in roads:
             road_id = self.graph.add_road(from_node, to_node, weight)
+            # Give the demo roads a quick descriptive name
+            self.graph.roads[road_id]['name'] = f"{from_node}→{to_node}"
             # Add 2 lanes per road
             for _ in range(2):
                 self.graph.roads[road_id]['lanes'].append(Lane(30, max_speed=5))
@@ -372,7 +375,6 @@ class TrafficSimulator:
 
             signal.timer = min(signal.timer, signal.cycle_time)
 
-
     def clear_network(self):
         """Clear all roads and nodes"""
         self.graph = RoadGraph()
@@ -384,6 +386,8 @@ class TrafficSimulator:
         """Add a road between two nodes"""
         if node1 and node2 and node1 != node2:
             road_id = self.graph.add_road(node1, node2, 10)
+            # give it a default name
+            self.graph.roads[road_id]['name'] = f"{node1}→{node2}"
             for _ in range(num_lanes):
                 self.graph.roads[road_id]['lanes'].append(Lane(30, max_speed=5))
 
@@ -563,10 +567,13 @@ class TrafficVisualizer:
         dy = py - projy
         return math.sqrt(dx * dx + dy * dy)
 
-    def _pick_road(self, x, y, pixel_threshold=10.0):
-        """Return road_id whose segment is closest to (x,y), if within threshold."""
-        best_road = None
-        best_dist = pixel_threshold
+    def _pick_roads_at(self, x, y, pixel_threshold=10.0):
+        """
+        Return a list of road_ids whose segments are within pixel_threshold
+        of (x, y), sorted by distance (closest first).
+        This lets us cycle through overlapping roads on repeated clicks.
+        """
+        candidates = []
 
         for road_id, road_data in self.sim.graph.roads.items():
             from_node = road_data['from']
@@ -579,11 +586,11 @@ class TrafficVisualizer:
             x2, y2 = self.sim.graph.nodes[to_node]
 
             d = self._point_to_segment_distance(x, y, x1, y1, x2, y2)
-            if d < best_dist:
-                best_dist = d
-                best_road = road_id
+            if d <= pixel_threshold:
+                candidates.append((road_id, d))
 
-        return best_road
+        candidates.sort(key=lambda t: t[1])
+        return [rid for rid, _ in candidates]
 
     # === UI setup ===
 
@@ -597,13 +604,13 @@ class TrafficVisualizer:
                 dpg.add_button(label="?", callback=self.show_help)
 
             dpg.add_separator()
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Start", callback=self.toggle_simulation, tag="start_btn")
+                dpg.add_button(label="Reset Demo", callback=self.reset_simulation)
+                dpg.add_button(label="Clear All", callback=self.clear_all)
 
             # Control panel
             with dpg.collapsing_header(label="Controls", default_open=True):
-                with dpg.group(horizontal=True):
-                    dpg.add_button(label="Start", callback=self.toggle_simulation, tag="start_btn")
-                    dpg.add_button(label="Reset Demo", callback=self.reset_simulation)
-                    dpg.add_button(label="Clear All", callback=self.clear_all)
 
                 dpg.add_slider_float(
                     label="Speed",
@@ -688,6 +695,8 @@ class TrafficVisualizer:
 VIEW MODE:
 - Watch the simulation
 - Click on a node or road to see its info in the Selection panel
+- If multiple roads overlap under the cursor (e.g., both directions),
+  repeated clicks will cycle through them.
 
 DRAW NODES MODE:
 - Click anywhere on canvas to create intersection nodes
@@ -702,7 +711,7 @@ COLORS:
 - Vehicles: Arrows showing direction
 - Signals: Green = active phase"""
 
-        with dpg.window(label="Help", modal=True, show=True, width=400, height=300, pos=(225, 200)) as help_win:
+        with dpg.window(label="Help", modal=True, show=True, width=500, height=300, pos=(225, 200)) as help_win:
             dpg.add_text(help_text)
 
     def set_mode(self, mode):
@@ -726,20 +735,55 @@ COLORS:
         if self.draw_mode == "view":
             # Try node first (bigger hit area)
             node_id = self.sim.graph.get_node_at(x, y, threshold=20)
+
+            # Find all roads under cursor
+            roads_under = self._pick_roads_at(x, y, pixel_threshold=10.0)
+
+            # Decide whether we're picking a node or road based on distance
+            chosen_type = None
+            chosen_id = None
+
+            # approximate distances for comparison
+            node_dist = None
             if node_id is not None:
+                nx, ny = self.sim.graph.nodes[node_id]
+                node_dist = math.hypot(x - nx, y - ny)
+
+            road_dist = None
+            if roads_under:
+                # distance for the closest road
+                first_road = roads_under[0]
+                rdata = self.sim.graph.roads[first_road]
+                fx, fy = self.sim.graph.nodes[rdata['from']]
+                tx, ty = self.sim.graph.nodes[rdata['to']]
+                road_dist = self._point_to_segment_distance(x, y, fx, fy, tx, ty)
+
+            # Choose whichever is closer (if both exist)
+            if node_id is not None and (road_dist is None or (node_dist is not None and node_dist <= road_dist)):
+                chosen_type = "node"
+                chosen_id = node_id
+            elif roads_under:
+                chosen_type = "road"
+                # If we already have a selected road under the cursor, cycle to the next one
+                if self.selection_type == "road" and self.selection_id in roads_under:
+                    idx = roads_under.index(self.selection_id)
+                    chosen_id = roads_under[(idx + 1) % len(roads_under)]
+                else:
+                    chosen_id = roads_under[0]
+
+            # Apply selection
+            if chosen_type == "node":
                 self.selection_type = "node"
-                self.selection_id = node_id
-                dpg.set_value("selection_label", f"Node: {node_id}")
+                self.selection_id = chosen_id
+                dpg.set_value("selection_label", f"Node: {chosen_id}")
                 return
 
-            # Try road
-            road_id = self._pick_road(x, y, pixel_threshold=10.0)
-            if road_id is not None:
-                r = self.sim.graph.roads[road_id]
-                label = f"Road {road_id}: {r['from']} → {r['to']}"
+            if chosen_type == "road":
                 self.selection_type = "road"
-                self.selection_id = road_id
-                dpg.set_value("selection_label", label)
+                self.selection_id = chosen_id
+                r = self.sim.graph.roads[chosen_id]
+                label = r.get('name', f"Road {chosen_id}")
+                dpg.set_value("selection_label", f"Road {chosen_id}: {label}")
                 return
 
             # Clicked empty space: clear selection
@@ -817,9 +861,13 @@ COLORS:
 
             color = (r, g, 0, 255)
 
+            # Highlight selected road
+            if self.selection_type == "road" and self.selection_id == road_id:
+                color = (0, 255, 255, 255)  # cyan for selected road
+
             dpg.draw_line((x1, y1), (x2, y2), color=color, thickness=8, parent="canvas")
 
-            # Draw arrow indicating road direction
+            # Direction arrow
             dx, dy = x2 - x1, y2 - y1
             length = math.sqrt(dx * dx + dy * dy)
             if length > 0:
@@ -835,13 +883,23 @@ COLORS:
                     parent="canvas"
                 )
 
+                # Road name (rotated along the road)
+                name = road_data.get('name', f"Road {road_id}")
+                dpg.draw_text(
+                    (mid_x, mid_y),
+                    name,
+                    color=(220, 220, 220, 255),
+                    size=13,
+                    parent="canvas"
+                )
+
         # Draw nodes
         for node_id, (x, y) in self.sim.graph.nodes.items():
             color = (100, 100, 100, 255)
 
             # Highlight node selected in View mode
             if self.selection_type == "node" and self.selection_id == node_id:
-                color = (100, 15, 10, 255)  # gold/yellow for selected node
+                color = (200, 180, 0, 255)  # gold/yellow for selected node
 
             # Highlight node used in draw_roads mode
             elif self.selected_node == node_id:
@@ -861,7 +919,6 @@ COLORS:
                 size=13,
                 parent="canvas"
             )
-
 
         # Draw vehicles as little arrows showing direction
         for vehicle_id, vdata in self.sim.vehicles.items():
