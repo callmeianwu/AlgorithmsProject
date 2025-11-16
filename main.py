@@ -314,26 +314,64 @@ class TrafficSimulator:
 
     def _rebuild_signal_phases(self):
         """
-        Rebuild phases for every signal so that
-        EVERY incoming road gets some green time.
-        Simple rule: one incoming road per phase.
+        Rebuild phases for every signal so that:
+        - For a clean 4-approach intersection, we do:
+            * Phase 0: East-West together
+            * Phase 1: North-South together
+        - For anything else, we fall back to one-road-per-phase
         """
         for node_id, signal in self.signals.items():
+            # All incoming roads into this node
             incoming = [
                 road_id
                 for road_id, r in self.graph.roads.items()
                 if r['to'] == node_id
             ]
 
-            # One road per phase -> works even with >4 approaches
-            signal.phases = [[rid] for rid in incoming]
+            phases = []
 
+            # Try special handling for a "normal" 4-way intersection
+            if len(incoming) == 4 and node_id in self.graph.nodes:
+                cx, cy = self.graph.nodes[node_id]
+
+                horizontals = []  # E/W approaches
+                verticals   = []  # N/S approaches
+
+                for rid in incoming:
+                    from_id = self.graph.roads[rid]['from']
+                    if from_id not in self.graph.nodes:
+                        continue
+
+                    fx, fy = self.graph.nodes[from_id]
+                    dx = fx - cx
+                    dy = fy - cy
+
+                    # If horizontal component is stronger → treat as E/W
+                    if abs(dx) >= abs(dy):
+                        horizontals.append(rid)
+                    else:
+                        verticals.append(rid)
+
+                # Build phases if we actually got groups
+                if horizontals:
+                    phases.append(horizontals)
+                if verticals:
+                    phases.append(verticals)
+
+            # Fallback: one-road-per-phase so everything eventually gets green
+            if not phases:
+                phases = [[rid] for rid in incoming]
+
+            signal.phases = phases
+
+            # Keep current_phase/timer sane relative to new phases
             if signal.phases:
                 signal.current_phase = signal.current_phase % len(signal.phases)
             else:
                 signal.current_phase = 0
 
             signal.timer = min(signal.timer, signal.cycle_time)
+
 
     def clear_network(self):
         """Clear all roads and nodes"""
