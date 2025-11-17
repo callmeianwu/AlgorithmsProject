@@ -661,30 +661,21 @@ class TrafficVisualizer:
         dy = py - projy
         return math.sqrt(dx * dx + dy * dy)
 
-    def _pick_roads_at(self, x, y, pixel_threshold=10.0):
+    def _pick_nodes_at(self, x, y, threshold=24.0):
         """
-        Return a list of road_ids whose segments are within pixel_threshold
-        of (x, y), sorted by distance (closest first).
-        This lets us cycle through overlapping roads on repeated clicks.
+        Return a list of node_ids within 'threshold' of (x, y),
+        sorted by distance (closest first).
+        This lets us pick the closest node or cycle through stacked nodes.
         """
         candidates = []
-
-        for road_id, road_data in self.sim.graph.roads.items():
-            from_node = road_data['from']
-            to_node = road_data['to']
-
-            if from_node not in self.sim.graph.nodes or to_node not in self.sim.graph.nodes:
-                continue
-
-            x1, y1 = self.sim.graph.nodes[from_node]
-            x2, y2 = self.sim.graph.nodes[to_node]
-
-            d = self._point_to_segment_distance(x, y, x1, y1, x2, y2)
-            if d <= pixel_threshold:
-                candidates.append((road_id, d))
+        for node_id, (nx, ny) in self.sim.graph.nodes.items():
+            dist = math.hypot(x - nx, y - ny)
+            if dist <= threshold:
+                candidates.append((node_id, dist))
 
         candidates.sort(key=lambda t: t[1])
-        return [rid for rid, _ in candidates]
+        return [nid for nid, _ in candidates]
+
 
     # === UI setup ===
 
@@ -869,19 +860,27 @@ COLORS:
             return
 
         # ===============================================================
-        # VIEW MODE: prefer nodes, then roads (cycle overlapping roads)
+        # VIEW MODE: prefer nodes, then roads (cycle overlapping items)
         # ===============================================================
         if self.draw_mode == "view":
-            # Bigger radius so nodes win more often
-            node_id = self.sim.graph.get_node_at(x, y, threshold=24)
+            # Get all nodes under cursor, sorted by distance
+            nodes_under = self._pick_nodes_at(x, y, threshold=24.0)
 
-            if node_id is not None:
+            if nodes_under:
+                # If a node is already selected and under cursor, cycle to next
+                if self.selection_type == "node" and self.selection_id in nodes_under:
+                    idx = nodes_under.index(self.selection_id)
+                    chosen_id = nodes_under[(idx + 1) % len(nodes_under)]
+                else:
+                    # Otherwise pick the closest
+                    chosen_id = nodes_under[0]
+
                 self.selection_type = "node"
-                self.selection_id = node_id
-                dpg.set_value("selection_label", f"Node: {node_id}")
+                self.selection_id = chosen_id
+                dpg.set_value("selection_label", f"Node: {chosen_id}")
                 return
 
-            # No node nearby: look for roads
+            # No node: look for roads
             roads_under = self._pick_roads_at(x, y, pixel_threshold=10.0)
 
             if roads_under:
@@ -912,9 +911,12 @@ COLORS:
             return
 
         if self.draw_mode == "draw_roads":
-            node = self.sim.graph.get_node_at(x, y, threshold=24)
-            if not node:
+            # Use the same node picker but just grab the closest one
+            nodes_under = self._pick_nodes_at(x, y, threshold=24.0)
+            if not nodes_under:
                 return
+
+            node = nodes_under[0]
 
             if self.selected_node is None:
                 # First endpoint
@@ -927,6 +929,7 @@ COLORS:
                 self.sim.add_road_between_nodes(self.selected_node, node)
                 self.selected_node = None
             return
+
 
     def handle_mouse_right(self, sender, app_data):
         # Only react when we're over the canvas
