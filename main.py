@@ -260,6 +260,7 @@ class TrafficSimulator:
         self.vehicle_counter = 0
         self.spawn_rate = 0.05
         self.use_astar = False
+        self.disabled_spawn_nodes = set()  # nodes that should not spawn vehicles
 
         # How strongly routing avoids congestion
         # 0.0 = ignore traffic, 1.0 = very sensitive (and we also square counts)
@@ -375,6 +376,23 @@ class TrafficSimulator:
 
             signal.timer = min(signal.timer, signal.cycle_time)
 
+    # ==== SPAWN MANAGEMENT ====================================================
+
+    def is_spawn_allowed(self, node_id):
+        """Return True if vehicles are allowed to spawn at node_id."""
+        return node_id in self.graph.nodes and node_id not in self.disabled_spawn_nodes
+
+    def set_spawn_allowed(self, node_id, allowed=True):
+        """Toggle whether vehicles can spawn from a node."""
+        if node_id not in self.graph.nodes:
+            self.disabled_spawn_nodes.discard(node_id)
+            return
+
+        if allowed:
+            self.disabled_spawn_nodes.discard(node_id)
+        else:
+            self.disabled_spawn_nodes.add(node_id)
+
     # ==== DELETE HELPERS =====================================================
 
     def delete_road(self, road_id):
@@ -432,6 +450,9 @@ class TrafficSimulator:
         if node_id not in self.graph.nodes:
             return
 
+        # Ensure spawn toggles are cleaned up for this node
+        self.disabled_spawn_nodes.discard(node_id)
+
         # Collect all roads that touch this node
         roads_to_delete = [
             rid for rid, r in list(self.graph.roads.items())
@@ -467,6 +488,7 @@ class TrafficSimulator:
         self.signals = {}
         self.vehicles = {}
         self.vehicle_counter = 0
+        self.disabled_spawn_nodes = set()
 
     def add_road_between_nodes(self, node1, node2, num_lanes=2):
         """Add a road between two nodes, unless one already exists in this direction."""
@@ -501,7 +523,11 @@ class TrafficSimulator:
         if len(nodes) < 2:
             return
 
-        start = random.choice(nodes)
+        spawnable_nodes = [n for n in nodes if self.is_spawn_allowed(n)]
+        if not spawnable_nodes:
+            return
+
+        start = random.choice(spawnable_nodes)
         goal = random.choice([n for n in nodes if n != start])
 
         # Get current traffic weights (this is where we consider congestion)
@@ -676,6 +702,26 @@ class TrafficVisualizer:
         candidates.sort(key=lambda t: t[1])
         return [nid for nid, _ in candidates]
 
+    def _pick_roads_at(self, x, y, pixel_threshold=10.0):
+        """
+        Return road ids whose segments are close to (x, y), sorted by distance.
+        """
+        candidates = []
+        for road_id, road in self.sim.graph.roads.items():
+            from_node = road['from']
+            to_node = road['to']
+
+            if from_node not in self.sim.graph.nodes or to_node not in self.sim.graph.nodes:
+                continue
+
+            x1, y1 = self.sim.graph.nodes[from_node]
+            x2, y2 = self.sim.graph.nodes[to_node]
+            dist = self._point_to_segment_distance(x, y, x1, y1, x2, y2)
+            if dist <= pixel_threshold:
+                candidates.append((road_id, dist))
+
+        candidates.sort(key=lambda t: t[1])
+        return [rid for rid, _ in candidates]
 
     # === UI setup ===
 
@@ -709,7 +755,7 @@ class TrafficVisualizer:
                     label="Spawn Rate",
                     default_value=0.05,
                     min_value=0.0,
-                    max_value=2.0,
+                    max_value=10.0,
                     callback=lambda s, v: setattr(self.sim, 'spawn_rate', v)
                 )
 
@@ -740,6 +786,12 @@ class TrafficVisualizer:
             # === Selection panel ===
             with dpg.collapsing_header(label="Selection", default_open=True):
                 dpg.add_text("Nothing selected", tag="selection_label")
+                dpg.add_checkbox(
+                    label="Allow spawning from node",
+                    tag="node_spawn_toggle",
+                    show=False,
+                    callback=self.handle_node_spawn_toggle
+                )
 
             # Stats
             dpg.add_text("", tag="stats")
@@ -831,9 +883,31 @@ COLORS:
             return
 
         # Clear selection label
-        self.selection_type = None
-        self.selection_id = None
-        dpg.set_value("selection_label", "Nothing selected")
+        self._update_selection(None, None, "Nothing selected")
+
+    def _update_selection(self, selection_type=None, selection_id=None, label="Nothing selected"):
+        """Centralized selection handling so the UI stays in sync."""
+        self.selection_type = selection_type
+        self.selection_id = selection_id
+
+        if dpg.does_item_exist("selection_label"):
+            dpg.set_value("selection_label", label)
+
+        if not dpg.does_item_exist("node_spawn_toggle"):
+            return
+
+        if selection_type == "node" and selection_id is not None:
+            allowed = self.sim.is_spawn_allowed(selection_id)
+            dpg.configure_item("node_spawn_toggle", show=True)
+            dpg.set_value("node_spawn_toggle", allowed)
+        else:
+            dpg.configure_item("node_spawn_toggle", show=False)
+
+    def handle_node_spawn_toggle(self, sender, app_data):
+        """Callback for the node spawn checkbox."""
+        if self.selection_type != "node" or self.selection_id is None:
+            return
+        self.sim.set_spawn_allowed(self.selection_id, bool(app_data))
 
     def set_mode(self, mode):
         self.draw_mode = mode
@@ -841,9 +915,7 @@ COLORS:
 
         # If leaving view mode, clear any selection
         if mode != "view":
-            self.selection_type = None
-            self.selection_id = None
-            dpg.set_value("selection_label", "Nothing selected")
+            self._update_selection(None, None, "Nothing selected")
 
         dpg.set_value("mode_text", f"Mode: {mode.replace('_', ' ').title()}")
 
@@ -875,9 +947,7 @@ COLORS:
                     # Otherwise pick the closest
                     chosen_id = nodes_under[0]
 
-                self.selection_type = "node"
-                self.selection_id = chosen_id
-                dpg.set_value("selection_label", f"Node: {chosen_id}")
+                self._update_selection("node", chosen_id, f"Node: {chosen_id}")
                 return
 
             # No node: look for roads
@@ -890,17 +960,13 @@ COLORS:
                 else:
                     chosen_id = roads_under[0]
 
-                self.selection_type = "road"
-                self.selection_id = chosen_id
                 r = self.sim.graph.roads[chosen_id]
                 label = r.get('name', f"Road {chosen_id}")
-                dpg.set_value("selection_label", f"Road {chosen_id}: {label}")
+                self._update_selection("road", chosen_id, f"Road {chosen_id}: {label}")
                 return
 
             # Nothing under cursor
-            self.selection_type = None
-            self.selection_id = None
-            dpg.set_value("selection_label", "Nothing selected")
+            self._update_selection(None, None, "Nothing selected")
             return
 
         # ===============================================================
@@ -956,11 +1022,9 @@ COLORS:
         else:
             chosen_id = roads_under[0]
 
-        self.selection_type = "road"
-        self.selection_id = chosen_id
         r = self.sim.graph.roads[chosen_id]
         label = r.get('name', f"Road {chosen_id}")
-        dpg.set_value("selection_label", f"Road {chosen_id}: {label}")
+        self._update_selection("road", chosen_id, f"Road {chosen_id}: {label}")
 
 
     def toggle_simulation(self):
@@ -974,21 +1038,72 @@ COLORS:
         self.sim = TrafficSimulator()
         dpg.set_item_label("start_btn", "Start")
         self.selected_node = None
-        self.selection_type = None
-        self.selection_id = None
-        dpg.set_value("selection_label", "Nothing selected")
+        self._update_selection(None, None, "Nothing selected")
 
     def clear_all(self):
         self.running = False
         self.sim.clear_network()
         dpg.set_item_label("start_btn", "Start")
         self.selected_node = None
-        self.selection_type = None
-        self.selection_id = None
-        dpg.set_value("selection_label", "Nothing selected")
+        self._update_selection(None, None, "Nothing selected")
 
     def render(self):
         dpg.delete_item("canvas", children_only=True)
+
+        # Precompute road pairs (undirected) to offset overlapping labels
+        road_pairs = defaultdict(list)
+        for rid, road in self.sim.graph.roads.items():
+            key = tuple(sorted((road['from'], road['to'])))
+            road_pairs[key].append(rid)
+
+        road_label_offsets = {}
+        label_spacing = 40
+
+        for pair_key, rid_list in road_pairs.items():
+            if len(rid_list) == 1:
+                road_label_offsets[rid_list[0]] = 0.0
+                continue
+
+            forward = []
+            reverse = []
+            for rid in rid_list:
+                road = self.sim.graph.roads[rid]
+                if road['from'] == pair_key[0]:
+                    forward.append(rid)
+                else:
+                    reverse.append(rid)
+
+            if not forward or not reverse:
+                # All roads in same direction; spread them evenly
+                center = (len(rid_list) - 1) / 2.0
+                for idx, rid in enumerate(sorted(rid_list)):
+                    road_label_offsets[rid] = label_spacing * (idx - center)
+                continue
+
+            # forward side: +offset, reverse side: -offset
+            for idx, rid in enumerate(sorted(forward)):
+                road_label_offsets[rid] = label_spacing * (idx + 0.5)
+            for idx, rid in enumerate(sorted(reverse)):
+                road_label_offsets[rid] = -label_spacing * (idx + 0.5)
+
+        # Precompute a *direction-agnostic* perpendicular per undirected pair
+        pair_perp = {}
+        for pair_key in road_pairs.keys():
+            n1, n2 = pair_key
+            if n1 in self.sim.graph.nodes and n2 in self.sim.graph.nodes:
+                x1, y1 = self.sim.graph.nodes[n1]
+                x2, y2 = self.sim.graph.nodes[n2]
+                dx = x2 - x1
+                dy = y2 - y1
+                length = math.hypot(dx, dy)
+                if length > 0:
+                    ux, uy = dx / length, dy / length
+                    # perpendicular for the pair (shared by both directions)
+                    pair_perp[pair_key] = (-uy, ux)
+                else:
+                    pair_perp[pair_key] = (0.0, 0.0)
+            else:
+                pair_perp[pair_key] = (0.0, 0.0)
 
         # Draw roads with traffic color coding
         for road_id, road_data in self.sim.graph.roads.items():
@@ -1039,13 +1154,25 @@ COLORS:
 
                 # Road name (rotated along the road)
                 name = road_data.get('name', f"Road {road_id}")
+                text_x, text_y = mid_x, mid_y
+
+                # Use the pair-level perpendicular so opposite directions don't cancel
+                pair_key = tuple(sorted((from_node, to_node)))
+                perp_x, perp_y = pair_perp.get(pair_key, (0.0, 0.0))
+
+                offset = road_label_offsets.get(road_id, 0.0)
+                if offset:
+                    text_x += perp_x * offset
+                    text_y += perp_y * offset
+
                 dpg.draw_text(
-                    (mid_x, mid_y),
+                    (text_x, text_y),
                     name,
                     color=(220, 220, 220, 255),
                     size=13,
                     parent="canvas"
                 )
+
 
         # Draw nodes
         for node_id, (x, y) in self.sim.graph.nodes.items():
