@@ -307,7 +307,7 @@ class TrafficSimulator:
         for from_node, to_node, weight in roads:
             road_id = self.graph.add_road(from_node, to_node, weight)
             # Give the demo roads a quick descriptive name
-            self.graph.roads[road_id]['name'] = f"{from_node}→{to_node}"
+            self.graph.roads[road_id]['name'] = f"{from_node}->{to_node}"
             # Add 2 lanes per road
             for _ in range(2):
                 self.graph.roads[road_id]['lanes'].append(Lane(30, max_speed=5))
@@ -349,7 +349,7 @@ class TrafficSimulator:
                     dx = fx - cx
                     dy = fy - cy
 
-                    # If horizontal component is stronger → treat as E/W
+                    # If horizontal component is stronger -> treat as E/W
                     if abs(dx) >= abs(dy):
                         horizontals.append(rid)
                     else:
@@ -375,6 +375,92 @@ class TrafficSimulator:
 
             signal.timer = min(signal.timer, signal.cycle_time)
 
+    # ==== DELETE HELPERS =====================================================
+
+    def delete_road(self, road_id):
+        """Remove a road, clean edges, vehicles, and signals that reference it."""
+        if road_id not in self.graph.roads:
+            return
+
+        road = self.graph.roads[road_id]
+        from_node = road['from']
+        to_node = road['to']
+
+        # Remove from adjacency list
+        if from_node in self.graph.edges:
+            self.graph.edges[from_node] = [
+                (nbr, w, rid) for (nbr, w, rid) in self.graph.edges[from_node]
+                if rid != road_id
+            ]
+
+        # Despawn any vehicles that are currently on this road
+        to_remove = []
+        for vid, v in list(self.vehicles.items()):
+            if v['road_id'] == road_id:
+                v['lane'].remove_vehicle(vid)
+                to_remove.append(vid)
+                continue
+
+            # Also despawn any that still plan to use this edge in their path
+            path = v.get('path', [])
+            for i in range(len(path) - 1):
+                if path[i] == from_node and path[i + 1] == to_node:
+                    v['lane'].remove_vehicle(vid)
+                    to_remove.append(vid)
+                    break
+
+        for vid in to_remove:
+            if vid in self.vehicles:
+                del self.vehicles[vid]
+
+        # Remove road from all signal phases
+        for signal in self.signals.values():
+            new_phases = []
+            for phase in signal.phases:
+                new_phase = [rid for rid in phase if rid != road_id]
+                if new_phase:
+                    new_phases.append(new_phase)
+            signal.phases = new_phases
+            if signal.current_phase >= len(signal.phases):
+                signal.current_phase = 0
+
+        # Finally remove from graph.roads
+        del self.graph.roads[road_id]
+
+    def delete_node(self, node_id):
+        """Delete a node and all roads attached to it."""
+        if node_id not in self.graph.nodes:
+            return
+
+        # Collect all roads that touch this node
+        roads_to_delete = [
+            rid for rid, r in list(self.graph.roads.items())
+            if r['from'] == node_id or r['to'] == node_id
+        ]
+
+        for rid in roads_to_delete:
+            self.delete_road(rid)
+
+        # Remove adjacency list for this node
+        if node_id in self.graph.edges:
+            del self.graph.edges[node_id]
+
+        # Remove as neighbor in others' adjacency lists
+        for from_node, out_list in list(self.graph.edges.items()):
+            self.graph.edges[from_node] = [
+                (nbr, w, rid) for (nbr, w, rid) in out_list
+                if nbr != node_id
+            ]
+
+        # Remove signal at this node, if any
+        if node_id in self.signals:
+            del self.signals[node_id]
+
+        # Finally remove the node itself
+        del self.graph.nodes[node_id]
+
+    # =====================================================================
+
     def clear_network(self):
         """Clear all roads and nodes"""
         self.graph = RoadGraph()
@@ -383,20 +469,28 @@ class TrafficSimulator:
         self.vehicle_counter = 0
 
     def add_road_between_nodes(self, node1, node2, num_lanes=2):
-        """Add a road between two nodes"""
-        if node1 and node2 and node1 != node2:
-            road_id = self.graph.add_road(node1, node2, 10)
-            # give it a default name
-            self.graph.roads[road_id]['name'] = f"{node1}→{node2}"
-            for _ in range(num_lanes):
-                self.graph.roads[road_id]['lanes'].append(Lane(30, max_speed=5))
+        """Add a road between two nodes, unless one already exists in this direction."""
+        if not (node1 and node2) or node1 == node2:
+            return None
 
-            # If there's already a signal at the destination, update its phases
-            if node2 in self.signals:
-                self._rebuild_signal_phases()
+        # Prevent duplicate directed roads: A->B can only exist once
+        existing = self._find_road(node1, node2)
+        if existing is not None:
+            # Already have a road node1 -> node2; don't add another overlapping one
+            return None
 
-            return road_id
-        return None
+        road_id = self.graph.add_road(node1, node2, 10)
+        # give it a default name
+        self.graph.roads[road_id]['name'] = f"{node1}->{node2}"
+        for _ in range(num_lanes):
+            self.graph.roads[road_id]['lanes'].append(Lane(30, max_speed=5))
+
+        # If there's already a signal at the destination, update its phases
+        if node2 in self.signals:
+            self._rebuild_signal_phases()
+
+        return road_id
+
 
     def spawn_vehicle(self):
         """Spawn a vehicle with random origin/destination"""
@@ -667,7 +761,22 @@ class TrafficVisualizer:
 
             # Mouse handler for canvas
             with dpg.handler_registry():
-                dpg.add_mouse_click_handler(callback=self.handle_mouse_click)
+                # Left-click handler (used for view + draw modes)
+                dpg.add_mouse_click_handler(
+                    callback=self.handle_mouse_left,
+                    button=dpg.mvMouseButton_Left
+                )
+
+                # Right-click handler (roads-only selection in view mode)
+                dpg.add_mouse_click_handler(
+                    callback=self.handle_mouse_right,
+                    button=dpg.mvMouseButton_Right
+                )
+
+                # Delete + Backspace keys
+                dpg.add_key_press_handler(callback=self.handle_key_press, key=dpg.mvKey_Delete)
+                dpg.add_key_press_handler(callback=self.handle_key_press, key=dpg.mvKey_Back)
+
 
         dpg.create_viewport(title="Traffic Simulator", width=1000, height=850)
         dpg.setup_dearpygui()
@@ -718,130 +827,138 @@ COLORS:
         with dpg.window(label="Help", modal=True, show=True, width=500, height=320, pos=(225, 200)) as help_win:
             dpg.add_text(help_text)
 
+    def handle_key_press(self, sender, app_data):
+        """Delete currently selected node/road when in view mode."""
+        if self.draw_mode != "view":
+            return
+
+        if self.selection_type == "node" and self.selection_id is not None:
+            self.sim.delete_node(self.selection_id)
+        elif self.selection_type == "road" and self.selection_id is not None:
+            self.sim.delete_road(self.selection_id)
+        else:
+            return
+
+        # Clear selection label
+        self.selection_type = None
+        self.selection_id = None
+        dpg.set_value("selection_label", "Nothing selected")
 
     def set_mode(self, mode):
         self.draw_mode = mode
         self.selected_node = None
+
+        # If leaving view mode, clear any selection
+        if mode != "view":
+            self.selection_type = None
+            self.selection_id = None
+            dpg.set_value("selection_label", "Nothing selected")
+
         dpg.set_value("mode_text", f"Mode: {mode.replace('_', ' ').title()}")
 
-    def handle_mouse_click(self, sender, app_data):
-        # app_data is the mouse button: 0=left, 1=right, 2=middle, etc.
-        button = app_data
 
+    def handle_mouse_left(self, sender, app_data):
         # Only react when we're over the canvas
         if not dpg.is_item_hovered("canvas"):
             return
 
-        # Drawing-local coordinates inside the drawlist
         x, y = dpg.get_drawing_mouse_pos()
 
         # Match the drawlist size (width=1800, height=600)
         if x < 0 or x > 1800 or y < 0 or y > 600:
             return
 
-        # =====================================================================
-        # VIEW MODE: Selection / Picking
-        # =====================================================================
+        # ===============================================================
+        # VIEW MODE: prefer nodes, then roads (cycle overlapping roads)
+        # ===============================================================
         if self.draw_mode == "view":
-            # LEFT CLICK: prefer nodes, then roads
-            if button == 0:
-                # Bigger node radius so they win more often
-                node_id = self.sim.graph.get_node_at(x, y, threshold=24)
+            # Bigger radius so nodes win more often
+            node_id = self.sim.graph.get_node_at(x, y, threshold=24)
 
-                if node_id is not None:
-                    # Select node and ignore roads for this click
-                    self.selection_type = "node"
-                    self.selection_id = node_id
-                    dpg.set_value("selection_label", f"Node: {node_id}")
-                    return
-
-                # No node nearby → look for roads
-                roads_under = self._pick_roads_at(x, y, pixel_threshold=10.0)
-
-                if roads_under:
-                    # If we already have a selected road under the cursor, cycle to the next one
-                    if self.selection_type == "road" and self.selection_id in roads_under:
-                        idx = roads_under.index(self.selection_id)
-                        chosen_id = roads_under[(idx + 1) % len(roads_under)]
-                    else:
-                        chosen_id = roads_under[0]
-
-                    self.selection_type = "road"
-                    self.selection_id = chosen_id
-                    r = self.sim.graph.roads[chosen_id]
-                    label = r.get('name', f"Road {chosen_id}")
-                    dpg.set_value("selection_label", f"Road {chosen_id}: {label}")
-                    return
-
-                # Nothing under cursor
-                self.selection_type = None
-                self.selection_id = None
-                dpg.set_value("selection_label", "Nothing selected")
+            if node_id is not None:
+                self.selection_type = "node"
+                self.selection_id = node_id
+                dpg.set_value("selection_label", f"Node: {node_id}")
                 return
 
-            # RIGHT CLICK: roads only, ignore nodes completely
-            if button == 1:
-                roads_under = self._pick_roads_at(x, y, pixel_threshold=10.0)
+            # No node nearby: look for roads
+            roads_under = self._pick_roads_at(x, y, pixel_threshold=10.0)
 
-                if roads_under:
-                    if self.selection_type == "road" and self.selection_id in roads_under:
-                        idx = roads_under.index(self.selection_id)
-                        chosen_id = roads_under[(idx + 1) % len(roads_under)]
-                    else:
-                        chosen_id = roads_under[0]
+            if roads_under:
+                if self.selection_type == "road" and self.selection_id in roads_under:
+                    idx = roads_under.index(self.selection_id)
+                    chosen_id = roads_under[(idx + 1) % len(roads_under)]
+                else:
+                    chosen_id = roads_under[0]
 
-                    self.selection_type = "road"
-                    self.selection_id = chosen_id
-                    r = self.sim.graph.roads[chosen_id]
-                    label = r.get('name', f"Road {chosen_id}")
-                    dpg.set_value("selection_label", f"Road {chosen_id}: {label}")
-                    return
-
-                # Right-click empty → don't force-clear selection, just leave as-is
+                self.selection_type = "road"
+                self.selection_id = chosen_id
+                r = self.sim.graph.roads[chosen_id]
+                label = r.get('name', f"Road {chosen_id}")
+                dpg.set_value("selection_label", f"Road {chosen_id}: {label}")
                 return
 
-            # Other buttons (middle, etc.) do nothing in view mode
+            # Nothing under cursor
+            self.selection_type = None
+            self.selection_id = None
+            dpg.set_value("selection_label", "Nothing selected")
             return
 
-        # =====================================================================
-        # DRAW MODES: only react to LEFT CLICK
-        # =====================================================================
-        if button != 0:
-            return
-
+        # ===============================================================
+        # DRAW MODES: left-click only
+        # ===============================================================
         if self.draw_mode == "draw_nodes":
             self.sim.graph.add_node_auto(x, y)
+            return
 
-        elif self.draw_mode == "draw_roads":
+        if self.draw_mode == "draw_roads":
             node = self.sim.graph.get_node_at(x, y, threshold=24)
+            if not node:
+                return
 
-            if node:
-                if self.selected_node is None:
-                    self.selected_node = node
-                elif self.selected_node == node:
-                    self.selected_node = None
-                else:
-                    self.sim.add_road_between_nodes(self.selected_node, node)
-                    self.selected_node = None
-        # Other modes: nothing
+            if self.selected_node is None:
+                # First endpoint
+                self.selected_node = node
+            elif self.selected_node == node:
+                # Click same node again: cancel
+                self.selected_node = None
+            else:
+                # Create road between selected_node and this node
+                self.sim.add_road_between_nodes(self.selected_node, node)
+                self.selected_node = None
+            return
 
+    def handle_mouse_right(self, sender, app_data):
+        # Only react when we're over the canvas
+        if not dpg.is_item_hovered("canvas"):
+            return
 
-        # === Draw modes ===
-        if self.draw_mode == "draw_nodes":
-            self.sim.graph.add_node_auto(x, y)
+        x, y = dpg.get_drawing_mouse_pos()
 
-        elif self.draw_mode == "draw_roads":
-            node = self.sim.graph.get_node_at(x, y)
+        if x < 0 or x > 1800 or y < 0 or y > 600:
+            return
 
-            if node:
-                if self.selected_node is None:
-                    self.selected_node = node
-                elif self.selected_node == node:
-                    self.selected_node = None
-                else:
-                    self.sim.add_road_between_nodes(self.selected_node, node)
-                    self.selected_node = None
-        # In other modes, clicks do nothing
+        # Only do anything in view mode
+        if self.draw_mode != "view":
+            return
+
+        roads_under = self._pick_roads_at(x, y, pixel_threshold=10.0)
+        if not roads_under:
+            # Right-click empty space: leave selection as-is
+            return
+
+        if self.selection_type == "road" and self.selection_id in roads_under:
+            idx = roads_under.index(self.selection_id)
+            chosen_id = roads_under[(idx + 1) % len(roads_under)]
+        else:
+            chosen_id = roads_under[0]
+
+        self.selection_type = "road"
+        self.selection_id = chosen_id
+        r = self.sim.graph.roads[chosen_id]
+        label = r.get('name', f"Road {chosen_id}")
+        dpg.set_value("selection_label", f"Road {chosen_id}: {label}")
+
 
     def toggle_simulation(self):
         self.running = not self.running
