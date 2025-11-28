@@ -19,7 +19,6 @@ class RoadGraph:
         self.nodes[node_id] = (x, y)
 
     def add_node_auto(self, x, y):
-        """Add node with auto-generated ID"""
         node_id = f"N{self.node_counter}"
         self.node_counter += 1
         self.add_node(node_id, x, y)
@@ -40,7 +39,6 @@ class RoadGraph:
         return road_id
 
     def get_node_at(self, x, y, threshold=20):
-        """Find node near position"""
         for node_id, (nx, ny) in self.nodes.items():
             dist = math.sqrt((nx - x) ** 2 + (ny - y) ** 2)
             if dist < threshold:
@@ -48,7 +46,6 @@ class RoadGraph:
         return None
 
     def dijkstra(self, start, goal, traffic_weights):
-        """Dijkstra with dynamic traffic weights"""
         pq = [(0, start, [])]
         visited = set()
 
@@ -72,7 +69,6 @@ class RoadGraph:
         return None, float('inf')
 
     def astar(self, start, goal, traffic_weights):
-        """A* with euclidean heuristic and traffic weights"""
         def heuristic(n1, n2):
             x1, y1 = self.nodes[n1]
             x2, y2 = self.nodes[n2]
@@ -126,7 +122,6 @@ class Lane:
             del self.speeds[vehicle_id]
 
     def step(self, signal_blocked=False):
-        """Nagel-Schreckenberg cellular automaton rules"""
         new_cells = [None] * self.length
         new_speeds = {}
 
@@ -157,7 +152,6 @@ class Lane:
         self.speeds = new_speeds
 
     def _gap_ahead(self, position):
-        """Calculate gap to next vehicle"""
         for i in range(position + 1, self.length):
             if self.cells[i] is not None:
                 return i - position - 1
@@ -167,7 +161,6 @@ class Lane:
         return sum(1 for cell in self.cells if cell is not None)
 
     def can_exit(self):
-        """Check if vehicle at end can exit"""
         return self.cells[-1] is not None
 
 
@@ -176,6 +169,8 @@ class Lane:
 class TrafficSignal:
     def __init__(self, node_id, phases, cycle_time=30):
         """
+        I want to add make sure it is noted here that this was rough:
+
         phases: list of phases, each phase is a list of road_ids that are green together.
         Example:
             phases = [
@@ -202,7 +197,6 @@ class TrafficSignal:
                 self.current_phase = (self.current_phase + 1) % len(self.phases)
         else:  # adaptive over PHASES instead of single roads
             if self.timer >= 10:  # Min green time
-                # Queue on the current phase
                 current_queue = 0
                 for road_id in self.phases[self.current_phase]:
                     current_queue += sum(
@@ -214,7 +208,6 @@ class TrafficSignal:
                 if current_queue < 2 or self.timer >= self.cycle_time:
                     self.timer = 0
 
-                    # Pick phase with max queue
                     max_queue = -1
                     next_phase = self.current_phase
                     for i, phase in enumerate(self.phases):
@@ -242,45 +235,41 @@ class TrafficSignal:
 class TrafficSimulator:
     def __init__(self):
         self.graph = RoadGraph()
-        self.signals = {}  # node_id -> TrafficSignal
-        self.vehicles = {}  # vehicle_id -> {...}
+        self.signals = {}  
+        self.vehicles = {}  
         self.vehicle_counter = 0
         self.spawn_rate = 0.05
         self.use_astar = False
-        self.disabled_spawn_nodes = set()  # nodes that should not spawn vehicles
+        self.disabled_spawn_nodes = set() 
 
         # How strongly routing avoids congestion
-        # 0.0 = ignore traffic, 1.0 = very sensitive (and we also square counts)
         self.traffic_sensitivity = 0.1
 
         self.vehicle_colors = [
-            (255, 255, 255, 255),   # White
-            (160, 200, 255, 255),   # Light blue
-            (120, 160, 255, 255),   # Medium blue
-            (200, 160, 255, 255),   # Lavender
-            (170, 120, 255, 255),   # Purple-ish
+            (255, 255, 255, 255),  
+            (160, 200, 255, 255),   
+            (120, 160, 255, 255),   
+            (200, 160, 255, 255),   
+            (170, 120, 255, 255),   
         ]
 
         self._setup_demo_network()
-        # Ensure initial signals are consistent with the roads
         self._rebuild_signal_phases()
 
     def _setup_demo_network(self):
-        """Create a demo intersection network"""
         nodes = {
             'W': (100, 300),
             'E': (700, 300),
             'N': (400, 50),
             'S': (400, 550),
-            'C': (400, 300),  # Center intersection
+            'C': (400, 300), 
         }
 
         for node_id, (x, y) in nodes.items():
             self.graph.add_node(node_id, x, y)
 
-        self.graph.node_counter = 5  # Set counter after manual nodes
+        self.graph.node_counter = 5  
 
-        # Add roads with lanes
         roads = [
             ('W', 'C', 10),
             ('C', 'E', 10),
@@ -294,22 +283,16 @@ class TrafficSimulator:
 
         for from_node, to_node, weight in roads:
             road_id = self.graph.add_road(from_node, to_node, weight)
-            # Give the demo roads a quick descriptive name
             self.graph.roads[road_id]['name'] = f"{from_node}->{to_node}"
-            # Add 2 lanes per road
             for _ in range(2):
                 self.graph.roads[road_id]['lanes'].append(Lane(30, max_speed=5))
 
-        # Create a signal at C with placeholder phases (will be rebuilt)
         self.signals['C'] = TrafficSignal('C', phases=[], cycle_time=30)
 
     def _rebuild_signal_phases(self):
         """
-        Rebuild phases for every signal so that:
-        - For a clean 4-approach intersection, we do:
-            * Phase 0: East-West together
-            * Phase 1: North-South together
-        - For anything else, we fall back to one-road-per-phase
+        This makes it so default road goes in phases of N/S and E/W but
+        everything else gets its own phase. 
         """
         for node_id, signal in self.signals.items():
             # All incoming roads into this node
@@ -321,12 +304,11 @@ class TrafficSimulator:
 
             phases = []
 
-            # Try special handling for a "normal" 4-way intersection
             if len(incoming) == 4 and node_id in self.graph.nodes:
                 cx, cy = self.graph.nodes[node_id]
 
-                horizontals = []  # E/W approaches
-                verticals   = []  # N/S approaches
+                horizontals = []  
+                verticals   = []  
 
                 for rid in incoming:
                     from_id = self.graph.roads[rid]['from']
@@ -349,13 +331,12 @@ class TrafficSimulator:
                 if verticals:
                     phases.append(verticals)
 
-            # Fallback: one-road-per-phase so everything eventually gets green
+            # Fallback
             if not phases:
                 phases = [[rid] for rid in incoming]
 
             signal.phases = phases
 
-            # Keep current_phase/timer sane relative to new phases
             if signal.phases:
                 signal.current_phase = signal.current_phase % len(signal.phases)
             else:
@@ -366,11 +347,9 @@ class TrafficSimulator:
     #  SPAWN MANAGEMENT                  
 
     def is_spawn_allowed(self, node_id):
-        """Return True if vehicles are allowed to spawn at node_id."""
         return node_id in self.graph.nodes and node_id not in self.disabled_spawn_nodes
 
     def set_spawn_allowed(self, node_id, allowed=True):
-        """Toggle whether vehicles can spawn from a node."""
         if node_id not in self.graph.nodes:
             self.disabled_spawn_nodes.discard(node_id)
             return
@@ -429,11 +408,9 @@ class TrafficSimulator:
             if signal.current_phase >= len(signal.phases):
                 signal.current_phase = 0
 
-        # Finally remove from graph.roads
         del self.graph.roads[road_id]
 
     def delete_node(self, node_id):
-        """Delete a node and all roads attached to it."""
         if node_id not in self.graph.nodes:
             return
 
@@ -464,13 +441,12 @@ class TrafficSimulator:
         if node_id in self.signals:
             del self.signals[node_id]
 
-        # Finally remove the node itself
+        # Yay all done! Now remove the node itself
         del self.graph.nodes[node_id]
 
     #                        
 
     def clear_network(self):
-        """Clear all roads and nodes"""
         self.graph = RoadGraph()
         self.signals = {}
         self.vehicles = {}
@@ -478,23 +454,20 @@ class TrafficSimulator:
         self.disabled_spawn_nodes = set()
 
     def add_road_between_nodes(self, node1, node2, num_lanes=2):
-        """Add a road between two nodes, unless one already exists in this direction."""
         if not (node1 and node2) or node1 == node2:
             return None
 
         # Prevent duplicate directed roads: A->B can only exist once
         existing = self._find_road(node1, node2)
         if existing is not None:
-            # Already have a road node1 -> node2; don't add another overlapping one
             return None
 
         road_id = self.graph.add_road(node1, node2, 10)
-        # give it a default name
         self.graph.roads[road_id]['name'] = f"{node1}->{node2}"
         for _ in range(num_lanes):
             self.graph.roads[road_id]['lanes'].append(Lane(30, max_speed=5))
 
-        # If there's already a signal at the destination, update its phases
+        # Update phases if already node has a signal 
         if node2 in self.signals:
             self._rebuild_signal_phases()
 
@@ -502,7 +475,7 @@ class TrafficSimulator:
 
 
     def spawn_vehicle(self):
-        """Spawn a vehicle with random origin/destination"""
+        
         if random.random() > self.spawn_rate:
             return
 
@@ -517,13 +490,11 @@ class TrafficSimulator:
         start = random.choice(spawnable_nodes)
         goal = random.choice([n for n in nodes if n != start])
 
-        # Get current traffic weights (this is where we consider congestion)
         traffic_weights = {}
         for road_id, road_data in self.graph.roads.items():
             total_vehicles = sum(lane.vehicle_count() for lane in road_data['lanes'])
 
-            # Strongly prefer roads with fewer cars:
-            # cost grows roughly with (vehicle_count^2)
+            # Strongly prefer roads with fewer cars
             base = 1.0 + self.traffic_sensitivity * (total_vehicles ** 2)
 
             traffic_weights[road_id] = base
@@ -538,7 +509,6 @@ class TrafficSimulator:
             vehicle_id = self.vehicle_counter
             self.vehicle_counter += 1
 
-            # Find first road and available lane
             first_road = self._find_road(path[0], path[1])
             if first_road is not None:
                 for lane in self.graph.roads[first_road]['lanes']:
@@ -553,18 +523,14 @@ class TrafficSimulator:
                         break
 
     def _find_road(self, from_node, to_node):
-        """Find road_id connecting two nodes"""
         for neighbor, _, road_id in self.graph.edges[from_node]:
             if neighbor == to_node:
                 return road_id
         return None
 
     def step(self):
-        """Simulate one time step"""
-        # Ensure signals know about any new roads (including ones you draw)
         self._rebuild_signal_phases()
 
-        # Update signals
         for signal in self.signals.values():
             signal.step(self.graph)
 
@@ -590,7 +556,6 @@ class TrafficSimulator:
                     lane.remove_vehicle(vehicle_id)
                     to_remove.append(vehicle_id)
                 else:
-                    # Move to next road
                     current_road = vdata['road_id']
                     to_node = self.graph.roads[current_road]['to']
 
@@ -603,7 +568,6 @@ class TrafficSimulator:
                             )
 
                             if next_road is not None:
-                                # Find available lane
                                 for next_lane in self.graph.roads[next_road]['lanes']:
                                     if next_lane.add_vehicle(vehicle_id, 0):
                                         lane.remove_vehicle(vehicle_id)
@@ -615,12 +579,10 @@ class TrafficSimulator:
         for vid in to_remove:
             del self.vehicles[vid]
 
-        # Update traffic levels (for coloring)
         for road_id, road_data in self.graph.roads.items():
             total_vehicles = sum(lane.vehicle_count() for lane in road_data['lanes'])
             road_data['current_traffic'] = total_vehicles
 
-        # Spawn new vehicles
         self.spawn_vehicle()
 
 
@@ -633,18 +595,15 @@ class TrafficVisualizer:
         self.speed = 10  # Steps per second
         self.last_step_time = time.time()
 
-        # Drawing mode
         self.draw_mode = "view"  # "view", "draw_nodes", "draw_roads"
-        self.selected_node = None  # used for drawing roads
+        self.selected_node = None  
 
-        #   Selection support  
         self.selection_type = None   # "node", "road", or None
         self.selection_id = None
 
-    #   Picking helpers  
 
     def _point_to_segment_distance(self, px, py, x1, y1, x2, y2):
-        """Distance from point (px,py) to line segment (x1,y1)-(x2,y2)."""
+        
         vx = x2 - x1
         vy = y2 - y1
         wx = px - x1
@@ -652,19 +611,16 @@ class TrafficVisualizer:
 
         c1 = vx * wx + vy * wy
         if c1 <= 0:
-            # Closest to (x1,y1)
             dx = px - x1
             dy = py - y1
             return math.sqrt(dx * dx + dy * dy)
 
         c2 = vx * vx + vy * vy
         if c2 <= c1:
-            # Closest to (x2,y2)
             dx = px - x2
             dy = py - y2
             return math.sqrt(dx * dx + dy * dy)
 
-        # Projection in the middle of the segment
         t = c1 / c2
         projx = x1 + t * vx
         projy = y1 + t * vy
@@ -673,11 +629,7 @@ class TrafficVisualizer:
         return math.sqrt(dx * dx + dy * dy)
 
     def _pick_nodes_at(self, x, y, threshold=24.0):
-        """
-        Return a list of node_ids within 'threshold' of (x, y),
-        sorted by distance (closest first).
-        This lets us pick the closest node or cycle through stacked nodes.
-        """
+       # Pick the closest node or cycle through stacked nodes. 
         candidates = []
         for node_id, (nx, ny) in self.sim.graph.nodes.items():
             dist = math.hypot(x - nx, y - ny)
@@ -688,9 +640,7 @@ class TrafficVisualizer:
         return [nid for nid, _ in candidates]
 
     def _pick_roads_at(self, x, y, pixel_threshold=10.0):
-        """
-        Return road ids whose segments are close to (x, y), sorted by distance.
-        """
+        # Return road ids whose segments are close to (x, y), and then we sort by distance.
         candidates = []
         for road_id, road in self.sim.graph.roads.items():
             from_node = road['from']
@@ -713,7 +663,6 @@ class TrafficVisualizer:
     def start(self):
         dpg.create_context()
 
-        # Setup window
         with dpg.window(label="Traffic Control Simulator", tag="main_window"):
             with dpg.group(horizontal=True):
                 dpg.add_text("Traffic Control Simulator")
@@ -760,7 +709,6 @@ class TrafficVisualizer:
 
                 dpg.add_separator()
 
-            # Drawing mode section
             with dpg.collapsing_header(label="Drawing Mode", default_open=True):
                 with dpg.group(horizontal=True):
                     dpg.add_button(label="View", callback=lambda: self.set_mode("view"))
@@ -768,7 +716,6 @@ class TrafficVisualizer:
                     dpg.add_button(label="Draw Roads", callback=lambda: self.set_mode("draw_roads"))
                 dpg.add_text("Mode: View", tag="mode_text")
 
-            #   Selection panel  
             with dpg.collapsing_header(label="Selection", default_open=True):
                 dpg.add_text("Nothing selected", tag="selection_label")
                 dpg.add_checkbox(
@@ -778,30 +725,24 @@ class TrafficVisualizer:
                     callback=self.handle_node_spawn_toggle
                 )
 
-            # Stats
             dpg.add_text("", tag="stats")
 
             dpg.add_separator()
 
-            # Drawing canvas (wider)
             with dpg.drawlist(width=1800, height=600, tag="canvas"):
                 pass
 
-            # Mouse handler for canvas
             with dpg.handler_registry():
-                # Left-click handler (used for view + draw modes)
                 dpg.add_mouse_click_handler(
                     callback=self.handle_mouse_left,
                     button=dpg.mvMouseButton_Left
                 )
 
-                # Right-click handler (roads-only selection in view mode)
                 dpg.add_mouse_click_handler(
                     callback=self.handle_mouse_right,
                     button=dpg.mvMouseButton_Right
                 )
 
-                # Delete + Backspace keys
                 dpg.add_key_press_handler(callback=self.handle_key_press, key=dpg.mvKey_Delete)
                 dpg.add_key_press_handler(callback=self.handle_key_press, key=dpg.mvKey_Back)
 
@@ -811,7 +752,6 @@ class TrafficVisualizer:
         dpg.show_viewport()
         dpg.set_primary_window("main_window", True)
 
-        # Render loop
         while dpg.is_dearpygui_running():
             current_time = time.time()
 
@@ -856,7 +796,6 @@ COLORS:
             dpg.add_text(help_text)
 
     def handle_key_press(self, sender, app_data):
-        """Delete currently selected node/road when in view mode."""
         if self.draw_mode != "view":
             return
 
@@ -871,7 +810,6 @@ COLORS:
         self._update_selection(None, None, "Nothing selected")
 
     def _update_selection(self, selection_type=None, selection_id=None, label="Nothing selected"):
-        """Centralized selection handling so the UI stays in sync."""
         self.selection_type = selection_type
         self.selection_id = selection_id
 
@@ -889,7 +827,6 @@ COLORS:
             dpg.configure_item("node_spawn_toggle", show=False)
 
     def handle_node_spawn_toggle(self, sender, app_data):
-        """Callback for the node spawn checkbox."""
         if self.selection_type != "node" or self.selection_id is None:
             return
         self.sim.set_spawn_allowed(self.selection_id, bool(app_data))
@@ -898,7 +835,6 @@ COLORS:
         self.draw_mode = mode
         self.selected_node = None
 
-        # If leaving view mode, clear any selection
         if mode != "view":
             self._update_selection(None, None, "Nothing selected")
 
@@ -906,28 +842,25 @@ COLORS:
 
 
     def handle_mouse_left(self, sender, app_data):
-        # Only react when we're over the canvas
         if not dpg.is_item_hovered("canvas"):
             return
 
         x, y = dpg.get_drawing_mouse_pos()
 
-        # Match the drawlist size (width=1800, height=600)
+        # IF I WANT TO CHANGE MATCH: drawlist size (width=1800, height=600)
         if x < 0 or x > 1800 or y < 0 or y > 600:
             return
 
-        # VIEW MODE: prefer nodes, then roads (cycle overlapping items)
         if self.draw_mode == "view":
             # Get all nodes under cursor, sorted by distance
             nodes_under = self._pick_nodes_at(x, y, threshold=24.0)
 
             if nodes_under:
-                # If a node is already selected and under cursor, cycle to next
+                # Cycle selected nodes
                 if self.selection_type == "node" and self.selection_id in nodes_under:
                     idx = nodes_under.index(self.selection_id)
                     chosen_id = nodes_under[(idx + 1) % len(nodes_under)]
                 else:
-                    # Otherwise pick the closest
                     chosen_id = nodes_under[0]
 
                 self._update_selection("node", chosen_id, f"Node: {chosen_id}")
@@ -948,17 +881,14 @@ COLORS:
                 self._update_selection("road", chosen_id, f"Road {chosen_id}: {label}")
                 return
 
-            # Nothing under cursor
             self._update_selection(None, None, "Nothing selected")
             return
 
-        # DRAW MODES: left-click only
         if self.draw_mode == "draw_nodes":
             self.sim.graph.add_node_auto(x, y)
             return
 
         if self.draw_mode == "draw_roads":
-            # Use the same node picker but just grab the closest one
             nodes_under = self._pick_nodes_at(x, y, threshold=24.0)
             if not nodes_under:
                 return
@@ -966,20 +896,16 @@ COLORS:
             node = nodes_under[0]
 
             if self.selected_node is None:
-                # First endpoint
                 self.selected_node = node
             elif self.selected_node == node:
-                # Click same node again: cancel
                 self.selected_node = None
             else:
-                # Create road between selected_node and this node
                 self.sim.add_road_between_nodes(self.selected_node, node)
                 self.selected_node = None
             return
 
 
     def handle_mouse_right(self, sender, app_data):
-        # Only react when we're over the canvas
         if not dpg.is_item_hovered("canvas"):
             return
 
@@ -988,13 +914,12 @@ COLORS:
         if x < 0 or x > 1800 or y < 0 or y > 600:
             return
 
-        # Only do anything in view mode
         if self.draw_mode != "view":
             return
 
         roads_under = self._pick_roads_at(x, y, pixel_threshold=10.0)
         if not roads_under:
-            # Right-click empty space: leave selection as-is
+            # Right-click empty space: leaveselection as-is
             return
 
         if self.selection_type == "road" and self.selection_id in roads_under:
@@ -1055,7 +980,6 @@ COLORS:
                     reverse.append(rid)
 
             if not forward or not reverse:
-                # All roads in same direction; spread them evenly
                 center = (len(rid_list) - 1) / 2.0
                 for idx, rid in enumerate(sorted(rid_list)):
                     road_label_offsets[rid] = label_spacing * (idx - center)
@@ -1079,7 +1003,6 @@ COLORS:
                 length = math.hypot(dx, dy)
                 if length > 0:
                     ux, uy = dx / length, dy / length
-                    # perpendicular for the pair (shared by both directions)
                     pair_perp[pair_key] = (-uy, ux)
                 else:
                     pair_perp[pair_key] = (0.0, 0.0)
@@ -1101,7 +1024,6 @@ COLORS:
             traffic = road_data['current_traffic']
             intensity = min(traffic / 10.0, 1.0)  # Normalize to [0, 1]
 
-            # Color interpolation: green (0,255,0) -> yellow -> red (255,0,0)
             if intensity < 0.5:
                 r = int(intensity * 2 * 255)
                 g = 255
@@ -1113,7 +1035,7 @@ COLORS:
 
             # Highlight selected road
             if self.selection_type == "road" and self.selection_id == road_id:
-                color = (0, 255, 255, 255)  # cyan for selected road
+                color = (0, 255, 255, 255) 
 
             dpg.draw_line((x1, y1), (x2, y2), color=color, thickness=8, parent="canvas")
 
@@ -1133,7 +1055,6 @@ COLORS:
                     parent="canvas"
                 )
 
-                # Road name (rotated along the road)
                 name = road_data.get('name', f"Road {road_id}")
                 text_x, text_y = mid_x, mid_y
 
@@ -1155,13 +1076,12 @@ COLORS:
                 )
 
 
-        # Draw nodes
         for node_id, (x, y) in self.sim.graph.nodes.items():
             color = (100, 100, 100, 255)
 
             # Highlight node selected in View mode
             if self.selection_type == "node" and self.selection_id == node_id:
-                color = (200, 180, 0, 255)  # gold/yellow for selected node
+                color = (200, 180, 0, 255)  
 
             # Highlight node used in draw_roads mode
             elif self.selected_node == node_id:
@@ -1182,7 +1102,7 @@ COLORS:
                 parent="canvas"
             )
 
-        # Draw vehicles as little arrows showing direction
+        # Lets draw vehicles here! I think arrows look fine for now, but Gabriel, you can draw something if you want.
         for vehicle_id, vdata in self.sim.vehicles.items():
             lane = vdata['lane']
             road_id = vdata['road_id']
@@ -1255,7 +1175,6 @@ COLORS:
         dpg.set_value("stats", f"Vehicles: {total_vehicles} | Nodes: {total_nodes} | Roads: {total_roads}")
 
 
-# MAIN
 
 if __name__ == "__main__":
     sim = TrafficSimulator()
