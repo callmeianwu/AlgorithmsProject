@@ -5,9 +5,7 @@ from collections import defaultdict
 import math
 import time
 
-# ============================================================================
 # GRAPH & ROUTING
-# ============================================================================
 
 class RoadGraph:
     def __init__(self):
@@ -105,10 +103,7 @@ class RoadGraph:
         return None, float('inf')
 
 
-# ============================================================================
 # CELLULAR AUTOMATON (Nagel-Schreckenberg Model)
-# ============================================================================
-
 class Lane:
     def __init__(self, length, max_speed=5):
         self.length = length
@@ -180,9 +175,7 @@ class Lane:
         return self.cells[-1] is not None
 
 
-# ============================================================================
 # TRAFFIC SIGNALS
-# ============================================================================
 
 class TrafficSignal:
     def __init__(self, node_id, phases, cycle_time=30):
@@ -248,9 +241,7 @@ class TrafficSignal:
         return road_id in self.phases[self.current_phase]
 
 
-# ============================================================================
 # TRAFFIC SIMULATOR
-# ============================================================================
 
 class TrafficSimulator:
     def __init__(self):
@@ -376,7 +367,7 @@ class TrafficSimulator:
 
             signal.timer = min(signal.timer, signal.cycle_time)
 
-    # ==== SPAWN MANAGEMENT ====================================================
+    #  SPAWN MANAGEMENT                  
 
     def is_spawn_allowed(self, node_id):
         """Return True if vehicles are allowed to spawn at node_id."""
@@ -393,7 +384,7 @@ class TrafficSimulator:
         else:
             self.disabled_spawn_nodes.add(node_id)
 
-    # ==== DELETE HELPERS =====================================================
+    #  DELETE HELPERS                  
 
     def delete_road(self, road_id):
         """Remove a road, clean edges, vehicles, and signals that reference it."""
@@ -480,7 +471,7 @@ class TrafficSimulator:
         # Finally remove the node itself
         del self.graph.nodes[node_id]
 
-    # =====================================================================
+    #                        
 
     def clear_network(self):
         """Clear all roads and nodes"""
@@ -637,9 +628,7 @@ class TrafficSimulator:
         self.spawn_vehicle()
 
 
-# ============================================================================
 # VISUALIZATION
-# ============================================================================
 
 class TrafficVisualizer:
     def __init__(self, simulator):
@@ -652,11 +641,11 @@ class TrafficVisualizer:
         self.draw_mode = "view"  # "view", "draw_nodes", "draw_roads"
         self.selected_node = None  # used for drawing roads
 
-        # === Selection support ===
+        #   Selection support  
         self.selection_type = None   # "node", "road", or None
         self.selection_id = None
 
-    # === Picking helpers ===
+    #   Picking helpers  
 
     def _point_to_segment_distance(self, px, py, x1, y1, x2, y2):
         """Distance from point (px,py) to line segment (x1,y1)-(x2,y2)."""
@@ -723,7 +712,7 @@ class TrafficVisualizer:
         candidates.sort(key=lambda t: t[1])
         return [rid for rid, _ in candidates]
 
-    # === UI setup ===
+    #   UI setup  
 
     def start(self):
         dpg.create_context()
@@ -783,7 +772,7 @@ class TrafficVisualizer:
                     dpg.add_button(label="Draw Roads", callback=lambda: self.set_mode("draw_roads"))
                 dpg.add_text("Mode: View", tag="mode_text")
 
-            # === Selection panel ===
+            #   Selection panel  
             with dpg.collapsing_header(label="Selection", default_open=True):
                 dpg.add_text("Nothing selected", tag="selection_label")
                 dpg.add_checkbox(
@@ -931,9 +920,7 @@ COLORS:
         if x < 0 or x > 1800 or y < 0 or y > 600:
             return
 
-        # ===============================================================
         # VIEW MODE: prefer nodes, then roads (cycle overlapping items)
-        # ===============================================================
         if self.draw_mode == "view":
             # Get all nodes under cursor, sorted by distance
             nodes_under = self._pick_nodes_at(x, y, threshold=24.0)
@@ -969,9 +956,7 @@ COLORS:
             self._update_selection(None, None, "Nothing selected")
             return
 
-        # ===============================================================
         # DRAW MODES: left-click only
-        # ===============================================================
         if self.draw_mode == "draw_nodes":
             self.sim.graph.add_node_auto(x, y)
             return
@@ -1274,9 +1259,7 @@ COLORS:
         dpg.set_value("stats", f"Vehicles: {total_vehicles} | Nodes: {total_nodes} | Roads: {total_roads}")
 
 
-# ============================================================================
 # MAIN
-# ============================================================================
 
 if __name__ == "__main__":
     sim = TrafficSimulator()
