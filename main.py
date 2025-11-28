@@ -33,8 +33,8 @@ class RoadGraph:
             'from': from_node,
             'to': to_node,
             'base_weight': base_weight,
-            'lanes': [],             # Will hold cellular automaton lanes
-            'current_traffic': 0,    # For visualization
+            'lanes': [],            
+            'current_traffic': 0,    
             'name': f"Road {road_id}"
         }
         return road_id
@@ -103,7 +103,7 @@ class RoadGraph:
         return None, float('inf')
 
 
-# CELLULAR AUTOMATON (Nagel-Schreckenberg Model)
+# CELLULAR AUTOMATON 
 class Lane:
     def __init__(self, length, max_speed=5):
         self.length = length
@@ -135,20 +135,16 @@ class Lane:
                 vehicle_id = self.cells[i]
                 speed = self.speeds[vehicle_id]
 
-                # Rule 1: Acceleration
                 if speed < self.max_speed:
                     speed += 1
 
-                # Rule 2: Slowing down (collision avoidance)
                 gap = self._gap_ahead(i)
                 if speed > gap:
                     speed = gap
 
-                # Rule 3: Signal blocking (at end of lane)
                 if signal_blocked and i + speed >= self.length:
                     speed = max(0, self.length - i - 1)
 
-                # Rule 4: Randomization (driver behavior)
                 if speed > 0 and random.random() < 0.2:
                     speed -= 1
 
