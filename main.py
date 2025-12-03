@@ -842,7 +842,12 @@ COLORS:
 
 
     def handle_mouse_left(self, sender, app_data):
+        # Don't intercept clicks on UI controls - only handle canvas clicks
         if not dpg.is_item_hovered("canvas"):
+            return
+        
+        # Check if any item is active (being clicked/dragged like a slider)
+        if dpg.get_active_window() != dpg.get_item_parent("canvas"):
             return
 
         x, y = dpg.get_drawing_mouse_pos()
@@ -906,7 +911,12 @@ COLORS:
 
 
     def handle_mouse_right(self, sender, app_data):
+        # Don't intercept clicks on UI controls - only handle canvas clicks
         if not dpg.is_item_hovered("canvas"):
+            return
+        
+        # Check if any item is active (being clicked/dragged like a slider)
+        if dpg.get_active_window() != dpg.get_item_parent("canvas"):
             return
 
         x, y = dpg.get_drawing_mouse_pos()
